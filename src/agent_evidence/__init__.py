@@ -8,6 +8,7 @@ from agent_evidence.models import (
     TrustLevel,
 )
 from agent_evidence.session import AuditSession
+from agent_evidence.signing import RecordSigner, verify_record_signature
 from agent_evidence.verify import VerificationError, VerificationReport, verify_file
 
 __all__ = [
@@ -16,8 +17,10 @@ __all__ = [
     "AuditSession",
     "Outcome",
     "RecordPhase",
+    "RecordSigner",
     "TrustLevel",
     "VerificationError",
     "VerificationReport",
     "verify_file",
+    "verify_record_signature",
 ]

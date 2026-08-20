@@ -2,6 +2,7 @@
 
 import math
 import re
+from base64 import urlsafe_b64decode
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
@@ -23,6 +24,7 @@ _SEMVER = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SIGNATURE = re.compile(r"^[A-Za-z0-9_-]{86}$")
 
 
 class ActionType(StrEnum):
@@ -92,6 +94,8 @@ class AuditRecord(BaseModel):
     parent_record_id: UUID4 | None
     prev_hash: str | None
     record_phase: RecordPhase
+    recording_component: AnyUrl | None = None
+    signature: str | None = None
 
     @field_validator("timestamp")
     @classmethod
@@ -112,6 +116,23 @@ class AuditRecord(BaseModel):
     def previous_hash(cls, value: str | None) -> str | None:
         if value is not None and not _SHA256.fullmatch(value):
             raise ValueError("prev_hash must be lowercase SHA-256 hexadecimal")
+        return value
+
+    @field_validator("signature")
+    @classmethod
+    def valid_signature(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not _SIGNATURE.fullmatch(value):
+            raise ValueError("signature must be unpadded Base64url containing 64 bytes")
+        try:
+            decoded = urlsafe_b64decode(value + "==")
+        except ValueError as exc:
+            raise ValueError(
+                "signature must be unpadded Base64url containing 64 bytes"
+            ) from exc
+        if len(decoded) != 64:
+            raise ValueError("signature must decode to exactly 64 bytes")
         return value
 
     @field_validator("action_detail")
@@ -174,3 +195,16 @@ class AuditRecord(BaseModel):
     @field_serializer("agent_id")
     def serialize_uri(self, value: AnyUrl) -> str:
         return str(value)
+
+    @field_serializer("recording_component")
+    def serialize_component(self, value: AnyUrl | None) -> str | None:
+        return None if value is None else str(value)
+
+    def json_compatible(self, *, include_signature: bool = True) -> dict[str, Any]:
+        """Return the wire representation, omitting absent Week 2 fields."""
+        exclude: set[str] = set()
+        if self.recording_component is None:
+            exclude.add("recording_component")
+        if self.signature is None or not include_signature:
+            exclude.add("signature")
+        return self.model_dump(mode="json", exclude=exclude)

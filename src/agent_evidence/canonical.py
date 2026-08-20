@@ -8,7 +8,7 @@ from agent_evidence.models import AuditRecord
 
 
 def canonical_bytes(record: AuditRecord) -> bytes:
-    return rfc8785.dumps(record.model_dump(mode="json"))
+    return rfc8785.dumps(record.json_compatible())
 
 
 def record_hash(record: AuditRecord) -> str:

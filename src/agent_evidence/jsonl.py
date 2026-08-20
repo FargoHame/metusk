@@ -14,7 +14,7 @@ class JsonlSink:
 
     def append(self, record: AuditRecord) -> None:
         line = json.dumps(
-            record.model_dump(mode="json"),
+            record.json_compatible(),
             ensure_ascii=False,
             separators=(",", ":"),
             allow_nan=False,

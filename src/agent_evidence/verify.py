@@ -9,6 +9,10 @@ from pydantic import ValidationError
 from agent_evidence.canonical import record_hash
 from agent_evidence.jsonl import MAX_RECORD_BYTES
 from agent_evidence.models import ActionType, AuditRecord, Outcome, RecordPhase
+from agent_evidence.signing import (
+    component_uri_from_public_key,
+    verify_record_signature,
+)
 
 
 @dataclass(frozen=True)
@@ -30,7 +34,7 @@ class VerificationReport:
         return asdict(self)
 
 
-def verify_file(path: Path) -> VerificationReport:
+def verify_file(path: Path, public_key: Path | None = None) -> VerificationReport:
     """Verify a trail; all record indexes in results are zero-based."""
     errors: list[VerificationError] = []
     try:
@@ -42,6 +46,8 @@ def verify_file(path: Path) -> VerificationReport:
 
     raw_lines = [line for line in text.splitlines() if line.strip()]
     records: list[AuditRecord | None] = []
+    raw_objects: list[object | None] = []
+    invalid_signature_indexes: set[int] = set()
     for index, line in enumerate(raw_lines):
         if len(line.encode("utf-8")) > MAX_RECORD_BYTES:
             errors.append(
@@ -52,11 +58,21 @@ def verify_file(path: Path) -> VerificationReport:
         except json.JSONDecodeError as exc:
             errors.append(VerificationError("JSON_INVALID", index, str(exc)))
             records.append(None)
+            raw_objects.append(None)
             continue
+        raw_objects.append(data)
         try:
             records.append(AuditRecord.model_validate(data))
         except ValidationError as exc:
-            errors.append(VerificationError("RECORD_INVALID", index, str(exc)))
+            if any(error["loc"] == ("signature",) for error in exc.errors()):
+                errors.append(
+                    VerificationError(
+                        "SIGNATURE_INVALID", index, "signature encoding is invalid"
+                    )
+                )
+                invalid_signature_indexes.add(index)
+            else:
+                errors.append(VerificationError("RECORD_INVALID", index, str(exc)))
             records.append(None)
 
     if len(raw_lines) < 2:
@@ -70,7 +86,9 @@ def verify_file(path: Path) -> VerificationReport:
         (index, record) for index, record in enumerate(records) if record is not None
     ]
     session_id = str(valid_records[0][1].session_id) if valid_records else None
-    first_break: int | None = None
+    first_break: int | None = (
+        min(invalid_signature_indexes) if invalid_signature_indexes else None
+    )
     seen: set[object] = set()
     for index, record in valid_records:
         if str(record.session_id) != session_id:
@@ -175,6 +193,104 @@ def verify_file(path: Path) -> VerificationReport:
                 "only the final record may be a valid session_end",
             )
         )
+
+    has_component = any(
+        isinstance(item, dict) and item.get("recording_component") is not None
+        for item in raw_objects
+    )
+    has_signature = any(
+        isinstance(item, dict) and item.get("signature") is not None
+        for item in raw_objects
+    )
+    signed_profile = has_component or has_signature
+    components: list[tuple[int, str]] = []
+    if has_component:
+        for index, record in valid_records:
+            if record.recording_component is None:
+                errors.append(
+                    VerificationError(
+                        "RECORDING_COMPONENT_MISSING",
+                        index,
+                        "independently recorded trail record lacks recording_component",
+                    )
+                )
+                if first_break is None or index < first_break:
+                    first_break = index
+            else:
+                components.append((index, str(record.recording_component)))
+        if components:
+            expected_component = components[0][1]
+            for index, component in components[1:]:
+                if component != expected_component:
+                    errors.append(
+                        VerificationError(
+                            "RECORDING_COMPONENT_MISMATCH",
+                            index,
+                            "recording_component differs within the trail",
+                        )
+                    )
+                    if first_break is None or index < first_break:
+                        first_break = index
+
+    if signed_profile:
+        for index, record in valid_records:
+            if record.signature is None:
+                errors.append(
+                    VerificationError(
+                        "SIGNATURE_MISSING",
+                        index,
+                        "signed trail record lacks signature",
+                    )
+                )
+                if first_break is None or index < first_break:
+                    first_break = index
+
+        if public_key is None:
+            errors.append(
+                VerificationError(
+                    "SIGNATURE_KEY_REQUIRED",
+                    None,
+                    "signed trail verification requires a public key",
+                )
+            )
+        else:
+            public_key_pem = public_key.read_bytes()
+            try:
+                key_component = component_uri_from_public_key(public_key_pem)
+            except (ValueError, TypeError):
+                errors.append(
+                    VerificationError(
+                        "SIGNATURE_INVALID", None, "public key is malformed or unusable"
+                    )
+                )
+            else:
+                for index, component in components:
+                    if component != key_component:
+                        errors.append(
+                            VerificationError(
+                                "RECORDING_COMPONENT_MISMATCH",
+                                index,
+                                "recording_component does not match the public key",
+                            )
+                        )
+                        if first_break is None or index < first_break:
+                            first_break = index
+                        break
+                for index, record in valid_records:
+                    if (
+                        record.signature is not None
+                        and index not in invalid_signature_indexes
+                        and not verify_record_signature(record, public_key_pem)
+                    ):
+                        errors.append(
+                            VerificationError(
+                                "SIGNATURE_INVALID",
+                                index,
+                                "record signature is invalid",
+                            )
+                        )
+                        if first_break is None or index < first_break:
+                            first_break = index
 
     return _report(len(raw_lines), session_id, first_break, errors)
 
