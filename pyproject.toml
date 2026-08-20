@@ -13,6 +13,9 @@ dependencies = [
     "uvicorn>=0.34,<1",
 ]
 
+[project.optional-dependencies]
+langgraph = ["langgraph>=1,<2"]
+
 [project.scripts]
 agent-evidence = "agent_evidence.cli:main"
 

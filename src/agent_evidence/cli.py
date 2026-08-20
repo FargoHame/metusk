@@ -35,6 +35,8 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=8765)
     signed_demo = commands.add_parser("signed-demo")
     signed_demo.add_argument("--url", default="http://127.0.0.1:8765")
+    langgraph_demo = commands.add_parser("langgraph-demo")
+    langgraph_demo.add_argument("--url", default="http://127.0.0.1:8765")
     return parser
 
 
@@ -104,6 +106,43 @@ def main(argv: list[str] | None = None) -> int:
                 client.close_session(session_id)
             finally:
                 client.close()
+            print(f"Session: {session_id}")
+            print(f"Expected trail: trails/{session_id}.jsonl")
+            return 0
+
+        if args.command == "langgraph-demo":
+            try:
+                from agent_evidence.integrations.langgraph import (
+                    LangGraphAuditError,
+                    run_deterministic_demo,
+                )
+            except ModuleNotFoundError as exc:
+                if exc.name and (
+                    exc.name == "langgraph"
+                    or exc.name.startswith("langgraph.")
+                    or exc.name == "langchain_core"
+                    or exc.name.startswith("langchain_core.")
+                ):
+                    print(
+                        "agent-evidence: LangGraph support is not installed; "
+                        "run `uv sync --extra langgraph`",
+                        file=sys.stderr,
+                    )
+                    return 2
+                raise
+            client = RecorderClient(args.url)
+            try:
+                try:
+                    result, session_id = run_deterministic_demo(client)
+                except LangGraphAuditError as exc:
+                    print(
+                        f"agent-evidence: LangGraph audit failed ({exc.code})",
+                        file=sys.stderr,
+                    )
+                    return 2
+            finally:
+                client.close()
+            print(f"Graph result: {json.dumps(result, sort_keys=True)}")
             print(f"Session: {session_id}")
             print(f"Expected trail: trails/{session_id}.jsonl")
             return 0
