@@ -3,3 +3,13 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+.metusk/
+*.pem
+*.jsonl
+demo/.tmp/
+demo/*.log
+demo/*.tmp
+dist/
+build/
+*.egg-info/
+WEEK*_SPEC.md
