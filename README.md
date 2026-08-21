@@ -1,99 +1,91 @@
-# agent-evidence
+# Metusk
 
-`agent-evidence` is a small, deterministic, framework-neutral Python library for creating and verifying tamper-evident JSONL audit trails for AI agents. It supports unsigned in-process trails and a loopback-only independent recorder that assigns chain metadata and signs every record with ECDSA P-256. It targets **draft-sharif-agent-audit-trail-01** (<https://datatracker.ietf.org/doc/draft-sharif-agent-audit-trail/>), which is an Internet-Draft, not an official IETF standard.
+Metusk creates and verifies tamper-evident JSONL audit trails for AI agents,
+with optional independent recording, ECDSA signatures, and LangGraph tool
+callbacks.
+
+It targets
+[`draft-sharif-agent-audit-trail-01`](https://datatracker.ietf.org/doc/draft-sharif-agent-audit-trail/),
+an Internet-Draft rather than an official IETF standard.
+
+## Architecture
+
+```text
+Agent or LangGraph tool
+        │ synchronous HTTP callbacks
+        ▼
+RecorderClient ──127.0.0.1──▶ independent Metusk recorder
+                                      │
+                                      ├── ECDSA P-256 key
+                                      └── signed, hash-chained JSONL
+                                                    │
+Public key ───────────────────────────────▶ verifier
+```
+
+The recorder owns record IDs, timestamps, chain links, persistence, and
+signatures. It binds only to `127.0.0.1` and uses one worker.
 
 ## Install
 
-Python 3.11 or newer and [uv](https://docs.astral.sh/uv/) are required:
+From PyPI after release:
 
 ```console
-uv sync
+uv add metusk
+uv add "metusk[langgraph]"  # optional LangGraph adapter
 ```
 
-LangGraph support is optional:
+From a source checkout:
 
 ```console
-uv sync --extra langgraph
+uv sync --all-extras
 ```
 
-## Unsigned Python API
+Python 3.11 or newer is required.
+
+## Unsigned demo
+
+```console
+uv run metusk demo --output trail.jsonl
+uv run metusk verify trail.jsonl
+```
+
+Unsigned trails detect edits to the captured hash chain, but an attacker can
+regenerate an entirely new unsigned chain.
+
+## Signed recorder demo
+
+Start the loopback recorder in one terminal:
+
+```console
+uv run metusk serve --data-dir .metusk --port 8765
+```
+
+In another terminal:
+
+```console
+uv run metusk signed-demo --url http://127.0.0.1:8765
+uv run metusk verify .metusk/trails/<session-id>.jsonl \
+  --public-key .metusk/public_key.pem
+```
+
+The private key is `.metusk/private_key.pem`. Treat it as sensitive and never
+commit or share it. Sessions left open when the recorder restarts are not
+resumed.
+
+## LangGraph integration
+
+Install the optional dependency and pass the callback explicitly:
 
 ```python
-from pathlib import Path
-from agent_evidence import AuditSession, ActionType, Outcome, RecordPhase, TrustLevel
-
-session = AuditSession.start(
-    "https://example.com/agents/one", "1.0.0", TrustLevel.L2, Path("trail.jsonl")
-)
-session.record(
-    ActionType.DECISION,
-    {"decision_type": "route"},
-    Outcome.SUCCESS,
-    RecordPhase.CONCURRENT,
-)
-session.close()
-```
-
-## CLI
-
-```console
-uv run agent-evidence demo --output trail.jsonl
-uv run agent-evidence verify trail.jsonl
-uv run agent-evidence verify trail.jsonl --json
-```
-
-## Independent recorder
-
-The agent sends action data over loopback HTTP to a separate recorder process. The recorder owns timestamps, IDs, chain links, persistence, recorder identity, and signatures:
-
-```console
-uv run agent-evidence serve --data-dir .agent-evidence --port 8765
-```
-
-The server always binds to `127.0.0.1` with one worker. Its private key is stored at `.agent-evidence/private_key.pem`; treat this file as sensitive and do not share or commit it. The public key is `.agent-evidence/public_key.pem`, and trails are written under `.agent-evidence/trails/`.
-
-Use the synchronous client from an agent process:
-
-```python
-from agent_evidence import ActionType, Outcome, RecordPhase, TrustLevel
-from agent_evidence.client import RecorderClient
-
-client = RecorderClient()
-session_id = client.start_session(
-    "https://example.com/agents/refund-agent", "0.1.0", TrustLevel.L2
-)
-client.record(
-    session_id,
-    ActionType.DECISION,
-    {"decision_type": "route"},
-    Outcome.SUCCESS,
-    RecordPhase.CONCURRENT,
-)
-client.close_session(session_id)
-client.close()
-```
-
-With the recorder running, create and verify a four-record signed example:
-
-```console
-uv run agent-evidence signed-demo --url http://127.0.0.1:8765
-uv run agent-evidence verify .agent-evidence/trails/<session-id>.jsonl --public-key .agent-evidence/public_key.pem
-```
-
-## LangGraph adapter
-
-The synchronous, fail-closed adapter observes tool callbacks and sends only payload hashes to the independent recorder:
-
-```python
-from agent_evidence import TrustLevel
-from agent_evidence.client import RecorderClient
-from agent_evidence.integrations.langgraph import LangGraphAuditSession
+from metusk import TrustLevel
+from metusk.client import RecorderClient
+from metusk.integrations.langgraph import LangGraphAuditSession
 
 client = RecorderClient()
 with LangGraphAuditSession(
     client,
     "https://example.com/agents/calculator",
-    "0.1.0",
+    "0.3.0",
     TrustLevel.L2,
 ) as audit:
     result = graph.invoke(
@@ -103,31 +95,48 @@ with LangGraphAuditSession(
 client.close()
 ```
 
-Start the recorder first, then run the deterministic local demo. It uses no model or provider API:
+The deterministic demo uses a local tool and requires no model API key:
 
 ```console
-uv run agent-evidence serve --data-dir .agent-evidence --port 8765
-uv run agent-evidence langgraph-demo --url http://127.0.0.1:8765
+uv run metusk langgraph-demo --url http://127.0.0.1:8765
 ```
 
-The adapter records `tool_call`, `tool_response`, tool errors, and one graph-level error when execution fails. It deliberately ignores node start/end, chain start/end, LLM, chat-model, retriever, text, retry, agent-action, and custom-event callbacks; graph nodes and model calls are not labeled as decisions. The context closes the lifecycle with `success` when recorder closure succeeds, while a preceding error record represents graph failure.
+The synchronous, fail-closed adapter records tool calls, tool responses, tool
+errors, and one graph-level error. It does not record prompts, model outputs,
+graph state, node execution, LLM callbacks, or activity that bypasses delivered
+callbacks. Tool inputs, outputs, and exception messages are hashed before they
+are sent to the recorder.
 
-Tool inputs, outputs, and exception messages are hashed in memory and are never sent or persisted as plaintext. Recorder failures propagate and stop an audited run. The adapter is synchronous only.
+## Terminal demo
 
-Each UTF-8 line is one compact JSON object. For example:
+![Metusk terminal demo](demo/metusk.gif)
 
-```json
-{"record_id":"38c966d1-0d66-49d6-a014-8d3e622b166a","timestamp":"2026-01-01T12:00:00.000Z","agent_id":"https://example.com/agents/one","agent_version":"1.0.0","session_id":"ba86bb48-7931-43bd-9d93-06503da021bb","action_type":"lifecycle","action_detail":{"event":"session_start"},"outcome":"success","trust_level":"L2","parent_record_id":null,"prev_hash":null,"record_phase":"concurrent"}
+[`demo/metusk.tape`](demo/metusk.tape) reproduces recorder startup, a LangGraph
+run, signed verification, trail tampering, and failed verification. Render it
+with [VHS](https://github.com/charmbracelet/vhs):
+
+```console
+vhs demo/metusk.tape
 ```
 
-Verifier error indexes are zero-based.
+## What Metusk establishes
 
-## Security limitations
+- Hash links reveal modification, deletion, insertion, or reordering within a
+  captured trail.
+- A valid signature shows that a record was produced with the recorder's
+  private key.
+- A separate recorder process reduces an agent process's ability to rewrite
+  already captured history.
 
-Hash chaining detects modification of a captured trail. Signing links records to the recorder key, and recording in a separate process reduces the agent's ability to rewrite history. It still cannot prove that every action was reported truthfully, and anyone holding the private key can create apparently valid records. An in-process recorder can be compromised with the agent, while an unsigned trail can be completely regenerated by an attacker and cannot be distinguished from the original.
+Metusk does not establish that every action was reported, that recorded action
+details are truthful or semantically correct, that activity outside observed
+callbacks did not occur, or that the private-key holder is trustworthy. Anyone
+with the private key can create apparently valid records. Metusk provides no
+regulatory certification or proof of complete agent behavior.
 
-The recorder is loopback-only. Keys survive restarts, but unfinished sessions are deliberately not resumed after restart. Raw secrets and personal data should not be placed in `action_detail`.
+Raw secrets and personal data should not be placed in `action_detail`. See
+[`SECURITY.md`](SECURITY.md) for private vulnerability reporting.
 
-The adapter sees only LangGraph/LangChain callback events delivered to it. Direct network, filesystem, subprocess, or tool activity outside callbacks is invisible. Hashing reduces stored-data exposure but does not prove semantic correctness or complete agent behavior. The recorder still runs on the same host.
+## License
 
-This project does not provide compliance certification.
+[MIT](LICENSE)
